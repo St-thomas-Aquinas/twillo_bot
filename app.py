@@ -2,6 +2,7 @@ import os
 import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.rest import Client
 from PyPDF2 import PdfReader
 
 app = Flask(__name__)
@@ -9,10 +10,20 @@ app = Flask(__name__)
 # ✅ Hugging Face Space API endpoint
 HF_SPACE_API_URL = "https://st-thomas-of-aquinas-document-verification.hf.space/predict"
 
+# ✅ Twilio credentials (from environment)
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_NUMBER = os.getenv("TWILIO_NUMBER")
+twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     incoming_msg = request.values.get("Body", "").strip()
     num_media = int(request.values.get("NumMedia", 0))
+    from_number = request.values.get("From")
+    to_number = request.values.get("To")
+
     resp = MessagingResponse()
     reply = resp.message()
 
@@ -21,16 +32,14 @@ def webhook():
         media_type = request.values.get("MediaContentType0")
 
         if media_type == "application/pdf":
-            try:
-                reply.body("⏳ Processing your document...")
+            # ✅ Immediate response
+            reply.body("⏳ Processing your document...")
 
-                # ✅ Download PDF from Twilio (with authentication)
+            try:
+                # ✅ Download PDF with Twilio auth
                 pdf_data = requests.get(
                     media_url,
-                    auth=(
-                        os.environ.get("TWILIO_ACCOUNT_SID"),
-                        os.environ.get("TWILIO_AUTH_TOKEN")
-                    )
+                    auth=(TWILIO_SID, TWILIO_AUTH)
                 ).content
 
                 # ✅ Save PDF temporarily
@@ -42,7 +51,11 @@ def webhook():
                 text = " ".join([page.extract_text() or "" for page in reader.pages]).strip()
 
                 if not text:
-                    reply.body("⚠️ Couldn’t extract any text from the PDF.")
+                    twilio_client.messages.create(
+                        body="⚠️ Couldn’t extract any text from the PDF.",
+                        from_=to_number,
+                        to=from_number
+                    )
                     return str(resp)
 
                 # ✅ Call Hugging Face API
@@ -52,34 +65,42 @@ def webhook():
                     try:
                         result = r.json()
 
-                        # If it's a classification list with labels & scores
-                        if isinstance(result, list) and all("label" in x and "score" in x for x in result):
-                            top = max(result, key=lambda x: x["score"])
-                            reply.body(f"✅ Highest Prediction:\nLabel: {top['label']}\nScore: {top['score']:.4f}")
-
-                        # If it's a dict with a prediction
-                        elif isinstance(result, dict):
-                            prediction = result.get("prediction", str(result))
-                            reply.body(f"✅ Prediction:\n{prediction}")
-
+                        if isinstance(result, dict) and "class_probabilities" in result:
+                            # pick highest
+                            probs = result.get("class_probabilities", {})
+                            if probs:
+                                label, score = max(probs.items(), key=lambda x: x[1])
+                                prediction_text = f"✅ Highest Prediction:\nLabel: {label}\nConfidence: {score*100:.2f}%"
+                            else:
+                                prediction_text = f"✅ Prediction: {result.get('predicted_label', 'Unknown')}"
                         else:
-                            # Fallback
-                            reply.body(f"✅ Prediction:\n{str(result)}")
+                            prediction_text = f"✅ Prediction:\n{str(result)}"
 
                     except Exception:
-                        # If not JSON, just send raw text
-                        reply.body(f"✅ Prediction:\n{r.text.strip()[:500]}")
+                        prediction_text = f"✅ Prediction:\n{r.text.strip()[:500]}"
                 else:
-                    reply.body(f"❌ API error {r.status_code}: {r.text[:200]}")
+                    prediction_text = f"❌ API error {r.status_code}: {r.text[:200]}"
+
+                # ✅ Send follow-up message with result
+                twilio_client.messages.create(
+                    body=prediction_text,
+                    from_=to_number,
+                    to=from_number
+                )
 
             except Exception as e:
-                reply.body(f"❌ Error processing document: {e}")
+                twilio_client.messages.create(
+                    body=f"❌ Error processing document: {e}",
+                    from_=to_number,
+                    to=from_number
+                )
         else:
             reply.body("⚠️ Please send a PDF with 'Doc verify'")
     else:
         reply.body("👋 Send 'Doc verify' followed by a PDF document.")
 
     return str(resp)
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
