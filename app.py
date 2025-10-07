@@ -1,5 +1,4 @@
 import os
-import io
 import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
@@ -9,6 +8,7 @@ from pdfminer.high_level import extract_text
 
 app = Flask(__name__)
 
+# Hugging Face Space API
 HF_SPACE_API_URL = "https://st-thomas-of-aquinas-document-verification.hf.space/predict"
 
 # Twilio credentials from environment variables
@@ -17,6 +17,7 @@ TWILIO_AUTH = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.getenv("TWILIO_NUMBER")
 
 twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -36,23 +37,30 @@ def webhook():
             reply.body("⏳ Processing your document...")  # instant response
 
             try:
-                # ✅ Download PDF safely
+                # ✅ Download PDF
                 pdf_response = requests.get(media_url, stream=True)
-                pdf_bytes = io.BytesIO(pdf_response.content)
+                with open("/tmp/temp.pdf", "wb") as f:
+                    f.write(pdf_response.content)
+                print("💾 Saved incoming PDF to /tmp/temp.pdf")
 
-                # ✅ Try PyPDF2 first
+                # ✅ Try parsing from saved file
                 text = ""
                 try:
-                    reader = PdfReader(pdf_bytes)
+                    reader = PdfReader("/tmp/temp.pdf")
                     text = " ".join([page.extract_text() or "" for page in reader.pages])
-                except Exception:
-                    # fallback to pdfminer if PyPDF2 fails
-                    pdf_bytes.seek(0)
-                    text = extract_text(pdf_bytes)
+                    print("✅ Extracted text with PyPDF2")
+                except Exception as e1:
+                    print(f"⚠️ PyPDF2 failed: {e1}, trying pdfminer...")
+                    try:
+                        text = extract_text("/tmp/temp.pdf")
+                        print("✅ Extracted text with pdfminer")
+                    except Exception as e2:
+                        print(f"❌ Both PyPDF2 and pdfminer failed: {e2}")
+                        raise Exception("Could not extract text from PDF")
 
                 if not text.strip():
                     twilio_client.messages.create(
-                        body="⚠️ Couldn’t extract text from this PDF.",
+                        body="⚠️ Couldn’t extract any text from this PDF.",
                         from_=to_number,
                         to=from_number
                     )
@@ -74,11 +82,12 @@ def webhook():
                             f"Label: {label}\n"
                             f"Confidence: {confidence:.2f}%"
                         )
-                    except Exception:
-                        prediction_text = f"⚠️ Got non-JSON: {r.text[:200]}"
+                    except Exception as e:
+                        prediction_text = f"⚠️ Got non-JSON response: {r.text[:200]} | Error: {e}"
                 else:
                     prediction_text = f"❌ API error {r.status_code}: {r.text[:200]}"
 
+                # ✅ Send prediction back to user
                 twilio_client.messages.create(
                     body=prediction_text,
                     from_=to_number,
@@ -86,8 +95,10 @@ def webhook():
                 )
 
             except Exception as e:
+                error_message = f"❌ Error processing document: {e}"
+                print(error_message)
                 twilio_client.messages.create(
-                    body=f"❌ Error processing document: {e}",
+                    body=error_message,
                     from_=to_number,
                     to=from_number
                 )
@@ -98,5 +109,6 @@ def webhook():
 
     return str(resp)
 
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=True)
