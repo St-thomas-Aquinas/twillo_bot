@@ -1,50 +1,55 @@
+import os
+import requests
+import tempfile
+import fitz
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-import requests
-import fitz  # PyMuPDF
-import tempfile
-import os
 
 app = Flask(__name__)
 
-HF_API = "https://st-thomas-of-aquinas-document-verification.hf.space/predict"
+# Twilio credentials (set these in Render as environment variables)
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH = os.getenv("TWILIO_AUTH_TOKEN")
 
-def extract_text_from_pdf(file_path):
-    text = ""
-    with fitz.open(file_path) as pdf:
-        for page in pdf:
-            text += page.get_text()
-    return text
+HF_API = "https://your-hf-endpoint.hf.space/predict"
+
+def extract_text(pdf_path):
+    txt = ""
+    with fitz.open(pdf_path) as doc:
+        for page in doc:
+            txt += page.get_text()
+    return txt
 
 @app.route("/whatsapp", methods=["POST"])
-def whatsapp_bot():
-    incoming_msg = request.form.get("Body", "").strip().lower()
-    media_url = request.form.get("MediaUrl0")  # WhatsApp attachment
+def whatsapp_webhook():
+    incoming_msg = request.values.get("Body", "").lower()
+    media_url = request.values.get("MediaUrl0", "")
+
     resp = MessagingResponse()
     msg = resp.message()
 
-    if "doc verify" in incoming_msg and media_url:
+    if "doc verify" in incoming_msg and media_url.endswith(".pdf"):
         try:
-            # Download PDF
-            pdf_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-            pdf_content = requests.get(media_url).content
-            pdf_file.write(pdf_content)
-            pdf_file.close()
+            # ✅ Download PDF with Twilio auth
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+            r = requests.get(media_url, auth=(TWILIO_SID, TWILIO_AUTH))
+            tmp.write(r.content)
+            tmp.close()
 
-            # Extract text
-            extracted_text = extract_text_from_pdf(pdf_file.name)
+            # ✅ Extract text
+            text = extract_text(tmp.name)
 
-            # Send to HF API
-            response = requests.post(HF_API, json={"text": extracted_text})
-            result = response.json()
+            # ✅ Send to Hugging Face API
+            hf_resp = requests.post(HF_API, json={"text": text})
+            prediction = hf_resp.json()
 
-            msg.body(f"📄 Doc Verification Result:\n{result}")
-            os.unlink(pdf_file.name)
+            msg.body(f"📄 Verification result:\n{prediction}")
 
         except Exception as e:
             msg.body(f"❌ Error processing document: {str(e)}")
+
     else:
-        msg.body("Hi 👋 Send 'Doc verify' with a PDF to check the document.")
+        msg.body("Please send a PDF with 'Doc verify'.")
 
     return str(resp)
 
