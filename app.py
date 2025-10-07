@@ -2,10 +2,11 @@ import os
 import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from PyPDF2 import PdfReader
 
 app = Flask(__name__)
 
-# Replace with your Gradio Space API
+# ✅ Hugging Face Space API endpoint
 HF_SPACE_API_URL = "https://st-thomas-of-aquinas-document-verification.hf.space/predict"
 
 @app.route("/webhook", methods=["POST"])
@@ -21,26 +22,40 @@ def webhook():
 
         if media_type == "application/pdf":
             try:
-                # Download PDF
-                pdf_data = requests.get(media_url).content
+                # ✅ Download PDF from Twilio (with authentication)
+                pdf_data = requests.get(
+                    media_url,
+                    auth=(
+                        os.environ.get("TWILIO_ACCOUNT_SID"),
+                        os.environ.get("TWILIO_AUTH_TOKEN")
+                    )
+                ).content
 
-                # ⚠️ You'll need to extract text from PDF before sending it
-                from PyPDF2 import PdfReader
+                # ✅ Save & extract text
                 with open("/tmp/temp.pdf", "wb") as f:
                     f.write(pdf_data)
                 reader = PdfReader("/tmp/temp.pdf")
-                text = " ".join([page.extract_text() or "" for page in reader.pages])
+                text = " ".join([page.extract_text() or "" for page in reader.pages]).strip()
 
-                # ✅ Call your Hugging Face Space (GET with params)
-                params = {"text": text}
-                r = requests.get(HF_SPACE_API_URL, params=params)
+                if not text:
+                    reply.body("⚠️ Couldn’t extract any text from the PDF.")
+                    return str(resp)
+
+                # ✅ Call Hugging Face API
+                r = requests.get(HF_SPACE_API_URL, params={"text": text})
 
                 if r.status_code == 200:
                     try:
+                        # Try to parse JSON
                         result = r.json()
-                        reply.body(f"✅ Prediction: {result}")
+                        if isinstance(result, dict):
+                            prediction = result.get("prediction", str(result))
+                        else:
+                            prediction = str(result)
+                        reply.body(f"✅ Prediction:\n{prediction}")
                     except Exception:
-                        reply.body(f"⚠️ Got non-JSON: {r.text[:200]}")
+                        # If not JSON, just send back raw text
+                        reply.body(f"✅ Prediction:\n{r.text.strip()[:500]}")
                 else:
                     reply.body(f"❌ API error {r.status_code}: {r.text[:200]}")
 
@@ -49,7 +64,7 @@ def webhook():
         else:
             reply.body("⚠️ Please send a PDF with 'Doc verify'")
     else:
-        reply.body("Send 'Doc verify' followed by a PDF document.")
+        reply.body("👋 Send 'Doc verify' followed by a PDF document.")
 
     return str(resp)
 
