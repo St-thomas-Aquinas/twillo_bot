@@ -1,16 +1,17 @@
 import os
+import io
 import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from PyPDF2 import PdfReader
+from pdfminer.high_level import extract_text
 
 app = Flask(__name__)
 
-# Hugging Face Space API
 HF_SPACE_API_URL = "https://st-thomas-of-aquinas-document-verification.hf.space/predict"
 
-# Twilio credentials (set as environment variables in Render/Docker)
+# Twilio credentials from environment variables
 TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.getenv("TWILIO_NUMBER")
@@ -32,20 +33,32 @@ def webhook():
         media_type = request.values.get("MediaContentType0")
 
         if media_type == "application/pdf":
-            # ✅ First response → tell user it's processing
-            reply.body("⏳ Processing your document...")
+            reply.body("⏳ Processing your document...")  # instant response
 
             try:
-                # Download PDF
-                pdf_data = requests.get(media_url).content
-                with open("/tmp/temp.pdf", "wb") as f:
-                    f.write(pdf_data)
+                # ✅ Download PDF safely
+                pdf_response = requests.get(media_url, stream=True)
+                pdf_bytes = io.BytesIO(pdf_response.content)
 
-                # Extract text
-                reader = PdfReader("/tmp/temp.pdf")
-                text = " ".join([page.extract_text() or "" for page in reader.pages])
+                # ✅ Try PyPDF2 first
+                text = ""
+                try:
+                    reader = PdfReader(pdf_bytes)
+                    text = " ".join([page.extract_text() or "" for page in reader.pages])
+                except Exception:
+                    # fallback to pdfminer if PyPDF2 fails
+                    pdf_bytes.seek(0)
+                    text = extract_text(pdf_bytes)
 
-                # Call Hugging Face model (GET with params)
+                if not text.strip():
+                    twilio_client.messages.create(
+                        body="⚠️ Couldn’t extract text from this PDF.",
+                        from_=to_number,
+                        to=from_number
+                    )
+                    return str(resp)
+
+                # ✅ Send to Hugging Face API
                 params = {"text": text}
                 r = requests.get(HF_SPACE_API_URL, params=params)
 
@@ -66,7 +79,6 @@ def webhook():
                 else:
                     prediction_text = f"❌ API error {r.status_code}: {r.text[:200]}"
 
-                # ✅ Send the final result as a new message
                 twilio_client.messages.create(
                     body=prediction_text,
                     from_=to_number,
