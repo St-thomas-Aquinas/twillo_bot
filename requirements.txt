@@ -1,7 +1,5 @@
 flask
-gunicorn
 twilio
 requests
-pymupdf
 PyPDF2
-
+pdfminer.six
