@@ -1,62 +1,55 @@
 import os
 import requests
-import tempfile
-import fitz  # PyMuPDF
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
-# 🔹 Twilio credentials (set these in Render → Environment Variables)
-TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH = os.getenv("TWILIO_AUTH_TOKEN")
+# Replace with your Gradio Space API
+HF_SPACE_API_URL = "https://st-thomas-of-aquinas-document-verification.hf.space/predict"
 
-# 🔹 Hugging Face API endpoint
-HF_API = "https://your-hf-endpoint.hf.space/predict"  # <-- replace with yours
-
-def extract_text(pdf_path):
-    """Extract text from PDF using PyMuPDF"""
-    text = ""
-    with fitz.open(pdf_path) as doc:
-        for page in doc:
-            text += page.get_text()
-    return text.strip()
-
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    incoming_msg = request.values.get("Body", "").lower().strip()
-    media_url = request.values.get("MediaUrl0", "")
-    media_type = request.values.get("MediaContentType0", "")
-
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    incoming_msg = request.values.get("Body", "").strip()
+    num_media = int(request.values.get("NumMedia", 0))
     resp = MessagingResponse()
-    msg = resp.message()
+    reply = resp.message()
 
-    # 🔹 Check if user asked for doc verify AND uploaded a PDF
-    if "doc verify" in incoming_msg and "application/pdf" in media_type:
-        try:
-            # Download PDF from Twilio's temporary URL
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-            r = requests.get(media_url, auth=(TWILIO_SID, TWILIO_AUTH))
-            tmp.write(r.content)
-            tmp.close()
+    if incoming_msg.lower().startswith("doc verify") and num_media > 0:
+        media_url = request.values.get("MediaUrl0")
+        media_type = request.values.get("MediaContentType0")
 
-            # Extract text from PDF
-            extracted_text = extract_text(tmp.name)
+        if media_type == "application/pdf":
+            try:
+                # Download PDF
+                pdf_data = requests.get(media_url).content
 
-            if not extracted_text:
-                msg.body("❌ Could not read any text from the document.")
-                return str(resp)
+                # ⚠️ You'll need to extract text from PDF before sending it
+                from PyPDF2 import PdfReader
+                with open("/tmp/temp.pdf", "wb") as f:
+                    f.write(pdf_data)
+                reader = PdfReader("/tmp/temp.pdf")
+                text = " ".join([page.extract_text() or "" for page in reader.pages])
 
-            # Send text to Hugging Face API
-            hf_resp = requests.post(HF_API, json={"text": extracted_text})
-            prediction = hf_resp.json()
+                # ✅ Call your Hugging Face Space (GET with params)
+                params = {"text": text}
+                r = requests.get(HF_SPACE_API_URL, params=params)
 
-            msg.body(f"📄 Verification result:\n{prediction}")
+                if r.status_code == 200:
+                    try:
+                        result = r.json()
+                        reply.body(f"✅ Prediction: {result}")
+                    except Exception:
+                        reply.body(f"⚠️ Got non-JSON: {r.text[:200]}")
+                else:
+                    reply.body(f"❌ API error {r.status_code}: {r.text[:200]}")
 
-        except Exception as e:
-            msg.body(f"❌ Error processing document: {str(e)}")
+            except Exception as e:
+                reply.body(f"❌ Error processing document: {e}")
+        else:
+            reply.body("⚠️ Please send a PDF with 'Doc verify'")
     else:
-        msg.body("⚠️ Please send a PDF with 'Doc verify' in the message.")
+        reply.body("Send 'Doc verify' followed by a PDF document.")
 
     return str(resp)
 
