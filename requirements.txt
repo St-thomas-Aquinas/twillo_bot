@@ -3,3 +3,4 @@ twilio
 requests
 PyPDF2
 pdfminer.six
+gunicorn
