@@ -70,7 +70,7 @@ def webhook():
                             probs = result.get("class_probabilities", {})
                             if probs:
                                 label, score = max(probs.items(), key=lambda x: x[1])
-                                prediction_text = f"✅ Highest Prediction:\nLabel: {label}\nConfidence: {score*100:.2f}%"
+                                prediction_text = f"The Author of this memo is:\nLabel: {label}"
                             else:
                                 prediction_text = f"✅ Prediction: {result.get('predicted_label', 'Unknown')}"
                         else:
